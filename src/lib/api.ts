@@ -1,8 +1,16 @@
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL;
+export const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api'
+).replace(/\/$/, '');
 
 const CLIENT_TYPE = 'cyberintel-admin';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  if (!API_BASE_URL || API_BASE_URL.includes('undefined')) {
+    throw new Error(
+      'NEXT_PUBLIC_API_URL is missing. Set it in Cloudflare → Settings → Environment variables, then redeploy.'
+    );
+  }
+
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
