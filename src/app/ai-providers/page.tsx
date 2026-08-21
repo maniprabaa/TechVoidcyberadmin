@@ -1,8 +1,9 @@
 'use client';
 
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
+import { Toast, type ToastState } from '@/components/Toast';
 
 interface Provider {
   _id: string;
@@ -23,6 +24,15 @@ interface Provider {
   lastTestStatus?: string;
   lastTestError?: string;
   lastTestedAt?: string;
+}
+
+interface TestResult {
+  ok: boolean;
+  tested?: boolean;
+  message?: string;
+  sample?: string;
+  error?: string;
+  model: string;
 }
 
 const emptyForm = {
@@ -48,6 +58,10 @@ export default function AiProvidersPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
+
+  const clearToast = useCallback(() => setToast(null), []);
 
   async function load() {
     const data = await api.get<{ items: Provider[] }>('/admin/ai-providers');
@@ -102,6 +116,51 @@ export default function AiProvidersPage() {
     }));
   }
 
+  async function runTest(p: Provider) {
+    setTestingId(p._id);
+    setToast({
+      kind: 'info',
+      title: `Testing “${p.name}”…`,
+      detail: `Sending a live probe to ${p.model}`,
+    });
+    try {
+      const res = await api.post<TestResult>(`/admin/ai-providers/${p._id}/test`);
+      if (res.ok) {
+        setToast({
+          kind: 'success',
+          title: `Test passed — ${p.name}`,
+          detail: [
+            `Model: ${res.model}`,
+            res.sample ? `Sample reply:\n${res.sample.slice(0, 400)}` : 'Provider responded successfully.',
+          ].join('\n'),
+        });
+      } else {
+        setToast({
+          kind: 'error',
+          title: `Test failed — ${p.name}`,
+          detail: [
+            `Model: ${res.model}`,
+            res.error || res.message || 'Unknown error',
+            res.error?.toLowerCase().includes('credit')
+              ? '\nTip: Anthropic billing/credits are empty — disable this provider or top up credits.'
+              : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        });
+      }
+      await load();
+    } catch (err) {
+      setToast({
+        kind: 'error',
+        title: `Test failed — ${p.name}`,
+        detail: err instanceof Error ? err.message : 'Request failed',
+      });
+    } finally {
+      setTestingId(null);
+    }
+  }
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setLoading(true);
@@ -114,16 +173,20 @@ export default function AiProvidersPage() {
       if (editingId) {
         await api.put(`/admin/ai-providers/${editingId}`, payload);
         setMessage('Provider updated');
+        setToast({ kind: 'success', title: 'Provider updated', detail: form.name });
       } else {
         if (!payload.apiKey) throw new Error('API key is required for new providers');
         await api.post('/admin/ai-providers', payload);
         setMessage('Provider added');
+        setToast({ kind: 'success', title: 'Provider added', detail: form.name });
       }
       setForm(emptyForm);
       setEditingId(null);
       await load();
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : 'Save failed');
+      const msg = err instanceof Error ? err.message : 'Save failed';
+      setMessage(msg);
+      setToast({ kind: 'error', title: 'Save failed', detail: msg });
     } finally {
       setLoading(false);
     }
@@ -131,6 +194,8 @@ export default function AiProvidersPage() {
 
   return (
     <div className="space-y-8">
+      <Toast toast={toast} onClose={clearToast} />
+
       <div>
         <h1 className="font-display text-3xl text-white">AI Providers</h1>
         <p className="mt-1 text-sm text-ink-400">
@@ -250,7 +315,7 @@ export default function AiProvidersPage() {
               <th className="px-4 py-3">Model</th>
               <th className="px-4 py-3">Priority</th>
               <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Test</th>
+              <th className="px-4 py-3">Last test</th>
               <th className="px-4 py-3">Actions</th>
             </tr>
           </thead>
@@ -272,8 +337,22 @@ export default function AiProvidersPage() {
                   {p.enabled ? 'enabled' : 'disabled'} · {p.roles?.join(', ')}
                 </td>
                 <td className="px-4 py-3 text-xs">
-                  <p>{p.lastTestStatus || 'never'}</p>
-                  {p.lastTestError && <p className="text-critical">{p.lastTestError}</p>}
+                  <p
+                    className={
+                      p.lastTestStatus === 'ok'
+                        ? 'text-emerald-400'
+                        : p.lastTestStatus === 'error'
+                          ? 'text-critical'
+                          : 'text-ink-400'
+                    }
+                  >
+                    {p.lastTestStatus === 'ok'
+                      ? 'PASSED'
+                      : p.lastTestStatus === 'error'
+                        ? 'FAILED'
+                        : 'never tested'}
+                  </p>
+                  {p.lastTestError && <p className="mt-1 text-critical">{p.lastTestError}</p>}
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex flex-col gap-1 text-xs">
@@ -282,18 +361,11 @@ export default function AiProvidersPage() {
                     </button>
                     <button
                       type="button"
-                      className="text-left text-accent"
-                      onClick={() =>
-                        api
-                          .post(`/admin/ai-providers/${p._id}/test`)
-                          .then((res) => {
-                            setMessage(JSON.stringify(res));
-                            return load();
-                          })
-                          .catch((e) => setMessage(e.message))
-                      }
+                      className="text-left text-accent disabled:opacity-50"
+                      disabled={testingId === p._id}
+                      onClick={() => void runTest(p)}
                     >
-                      Test
+                      {testingId === p._id ? 'Testing…' : 'Test connection'}
                     </button>
                     {!p.isDefault && (
                       <button
@@ -303,7 +375,13 @@ export default function AiProvidersPage() {
                           api
                             .post(`/admin/ai-providers/${p._id}/default`)
                             .then(load)
-                            .catch((e) => setMessage(e.message))
+                            .catch((e) =>
+                              setToast({
+                                kind: 'error',
+                                title: 'Could not set default',
+                                detail: e.message,
+                              })
+                            )
                         }
                       >
                         Make default
@@ -316,7 +394,13 @@ export default function AiProvidersPage() {
                         api
                           .delete(`/admin/ai-providers/${p._id}`)
                           .then(load)
-                          .catch((e) => setMessage(e.message))
+                          .catch((e) =>
+                            setToast({
+                              kind: 'error',
+                              title: 'Delete failed',
+                              detail: e.message,
+                            })
+                          )
                       }
                     >
                       Delete
